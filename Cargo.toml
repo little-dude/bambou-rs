@@ -1,0 +1,24 @@
+[package]
+name = "bambou"
+version = "0.1.0"
+authors = ["Corentin Henry <corentinhenry@gmail.com>"]
+description = "Library to build clients for REST APIs following Nuage Network's VSP conventions. See details at http://nuagenetworks.github.io/vsd-api-documentation/usage.html"
+documentation = ""
+homepage = "https://github.com/nuagenetworks/bambou-rs"
+repository = "https://github.com/nuagenetworks/bambou-rs"
+readme = "README.md"
+keywords = ["rest"]
+license-file = "LICENSE"
+
+[features]
+yaml = []
+yaml_format = []
+
+[dependencies]
+hyper = "*"
+serde = "0.8"
+serde_json = "0.8"
+serde_derive = "0.8"
+clippy = "*"
+log = "*"
+env_logger = "*"
