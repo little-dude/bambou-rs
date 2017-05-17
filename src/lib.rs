@@ -1,24 +1,19 @@
-#![feature(conservative_impl_trait)]
-#![feature(plugin)]
-#![plugin(clippy)]
 #[macro_use]
 extern crate hyper;
 extern crate serde;
 extern crate serde_json;
-#[macro_use]
-extern crate log;
+extern crate reqwest;
 
 pub mod error;
 
-use hyper::client::{Client, Response};
-use hyper::header::{Headers, Authorization, Basic, ContentType};
+use reqwest::{Client, Response, Url};
+use reqwest::header::{Headers, Authorization, Basic, ContentType};
 use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
-use hyper::status::StatusCode;
-use std::io::Read;
+use serde::Serialize;
 
-pub use error::{BambouError, Reason};
+pub use error::{Error};
 
-pub trait RestEntity<'a>: serde::Serialize + serde::Deserialize {
+pub trait RestEntity<'a>: Serialize + for<'de> serde::Deserialize<'de> {
     /// Give a reference to an existing session to the entity. Without a session, an entity is
     /// pretty much useless, since it cannot be fetched, updated, deleted or used to create
     /// children entities.
@@ -41,23 +36,23 @@ pub trait RestEntity<'a>: serde::Serialize + serde::Deserialize {
     fn is_root(&self) -> bool;
 
     /// Fetch the entity from the server and populate its attributes from the response.
-    fn fetch(&mut self) -> Result<Response, BambouError>;
+    fn fetch(&mut self) -> Result<Response, Error>;
 
     /// Update the entity on the server from its attributes.
-    fn save(&mut self) -> Result<Response, BambouError>;
+    fn save(&mut self) -> Result<Response, Error>;
 
     /// Delete the entity from the server.
-    fn delete(self) -> Result<Response, BambouError>;
+    fn delete(self) -> Result<Response, Error>;
 
     /// Fetch children entities from the server.
-    fn fetch_children<C>(&self, children: &mut Vec<C>) -> Result<Response, BambouError>
+    // fn fetch_children<C>(&self, children: &mut Vec<C>) -> Fetcher<C>
+    fn fetch_children<C>(&self, children: &mut Vec<C>) -> Result<Response, Error>
         where C: RestEntity<'a>;
 
     /// Create a child entity.
-    fn create_child<C>(&self, child: &mut C) -> Result<Response, BambouError>
+    fn create_child<C>(&self, child: &mut C) -> Result<Response, Error>
         where C: RestEntity<'a>;
 }
-
 pub trait RestRootEntity<'a>: RestEntity<'a> {
     /// Return the API key for the current session. After the first password authentication, the
     /// root entity should hold an API key. This API key is then used by the session for all
@@ -65,73 +60,84 @@ pub trait RestRootEntity<'a>: RestEntity<'a> {
     fn get_api_key(&self) -> Option<&str>;
 }
 
+#[derive(Clone)]
 pub struct Session {
     client: Client,
-    config: SessionConfig,
-}
-
-pub struct SessionConfig {
-    pub url: String,
+    pub url: Url,
     pub username: String,
     pub password: String,
     pub api_key: Option<String>,
     pub organization: String,
-    pub root: String,
 }
 
 header! { (XNuageOrganization, "X-Nuage-Organization") => [String] }
 
 impl<'a> Session {
     /// Create a new session.
-    pub fn new(config: SessionConfig) -> Self {
+    pub fn new(url: &str, login: &str, password: &str, organization: &str) -> Self {
         Session {
-            config: config,
-            client: Client::new(),
+            client: Client::new().unwrap(),
+            url: Url::parse(url).unwrap(),
+            username: login.to_owned(),
+            password: password.to_owned(),
+            organization: organization.to_owned(),
+            api_key: None,
         }
     }
 
     /// Delete an entity. This consumes the entity.
-    pub fn delete<E>(&self, entity: E) -> Result<Response, BambouError>
+    pub fn delete<E>(&self, entity: E) -> Result<Response, Error>
         where E: RestEntity<'a>
     {
-        Ok(try!(self.http_delete(&self.get_entity_path(&entity), self.get_common_headers())).0)
+        let url = self.entity_url(&entity)?;
+        let headers = self.headers();
+        let resp = self.client
+            .delete(url)
+            .headers(headers)
+            .send()?;
+        Ok(resp)
     }
 
     /// Save an entity.
-    pub fn save<E>(&'a self, entity: &mut E) -> Result<Response, BambouError>
+    pub fn save<E>(&'a self, entity: &mut E) -> Result<Response, Error>
         where E: RestEntity<'a>
     {
-        let path = self.get_entity_path(entity);
-        let body = try!(serde_json::to_string(&entity));
-        let headers = self.get_common_headers();
+        let headers = self.headers();
+        let url = self.entity_url(entity)?;
 
-        let (resp, body) = try!(self.http_put(&path, &body, headers));
+        let mut resp = self.client
+            .put(url)
+            .headers(headers)
+            .json(entity)
+            .send()?;
 
-        let mut entities: Vec<E> = try!(serde_json::from_str(&body));
-        *entity = try!(entities.pop()
-            .ok_or(BambouError::InvalidResponse("Failed to read updated entity : body is empty."
-                .to_string())));
+        let mut entities: Vec<E> = resp.json()?;
+        *entity = entities
+            .pop()
+            .unwrap();
         entity.set_session(self);
-
         Ok(resp)
     }
 
     /// Create a child under the parent, and give the child a reference to the current session.
-    pub fn create_child<P, C>(&'a self, parent: &P, child: &mut C) -> Result<Response, BambouError>
+    pub fn create_child<P, C>(&'a self, parent: &P, child: &mut C) -> Result<Response, Error>
         where P: RestEntity<'a>,
               C: RestEntity<'a>
     {
-        let mut path = String::new();
-        if !parent.is_root() {
-            self.get_entity_path(parent);
-        }
-        path.push_str(C::group_path());
+        let url = if parent.is_root() {
+            self.url.join(C::group_path()).unwrap()
+        } else {
+            self.entity_url(parent).unwrap().join(C::group_path()).unwrap()
+        };
+        let headers = self.headers();
 
-        let body = try!(serde_json::to_string(&child));
+        let mut resp = self.client
+            .post(url)
+            .headers(headers)
+            .json(child)
+            .send()?;
 
-        let (resp, body) = try!(self.http_post(&path, &body, self.get_common_headers()));
-
-        let mut entities: Vec<C> = try!(serde_json::from_str(&body));
+        let mut entities: Vec<C> = resp.json()?;
         *child = entities.pop().unwrap();
         child.set_session(self);
         Ok(resp)
@@ -139,204 +145,89 @@ impl<'a> Session {
 
     /// Fetch the children of a parent entity, and give the children a reference to the current
     /// session.
-    pub fn fetch_children<P, C>(&'a self,
-                                parent: &P,
-                                children: &mut Vec<C>)
-                                -> Result<Response, BambouError>
+    pub fn fetch_children<P, C>(&'a self, parent: &P, children: &mut Vec<C>) -> Result<Response, Error>
         where P: RestEntity<'a>,
               C: RestEntity<'a>
     {
-        let mut path = String::new();
-        if !parent.is_root() {
-            self.get_entity_path(parent);
-        }
-        path.push_str(C::path());
-        let (resp, body) = try!(self.http_get(&path, self.get_common_headers()));
-        *children = try!(serde_json::from_str(&body));
-        for child in children {
+        let url = if parent.is_root() {
+            self.url.join(C::group_path()).unwrap()
+        } else {
+            self.entity_url(parent).unwrap().join(C::group_path()).unwrap()
+        };
+        let headers = self.headers();
+        let mut resp = self.client
+            .get(url)
+            .headers(headers)
+            .send()?;
+
+        // XXX: No idea why I can't just write `children = resp.json()?;`
+        let children_: Vec<C> = resp.json()?;
+        *children = children_;
+
+        for mut child in children {
             child.set_session(self);
         }
         Ok(resp)
     }
 
-    /// Fetch and entity, populate its attributes, and set the session on the entity.
-    pub fn fetch<E>(&'a self, entity: &mut E) -> Result<Response, BambouError>
+    /// Start a new session. The root object is populated with a reference to the session.
+    pub fn connect<R>(&'a mut self, root: &mut R) -> Result<Response, Error>
+        where R: RestRootEntity<'a>
+    {
+        let url = self.entity_url(root).unwrap();
+        let headers = self.headers();
+        let client = self.client.clone();
+        let mut resp = client
+            .get(url)
+            .headers(headers)
+            .send()?;
+        let mut entities: Vec<R> = resp.json().unwrap();
+        *root = entities.pop().unwrap();
+        self.api_key = Some(root.get_api_key().unwrap().to_string());
+        root.set_session(self);
+        Ok(resp)
+    }
+
+    /// Fetch an entity and populate its attributes, and set its session.
+    pub fn fetch_entity<E>(&'a self, entity: &mut E) -> Result<Response, Error>
         where E: RestEntity<'a>
     {
-        let resp = try!(self.fetch_entity(entity));
+        let url = self.entity_url(entity)?;
+        let headers = self.headers();
+        let mut resp = self.client
+            .get(url)
+            .headers(headers)
+            .send()?;
+        let mut entities: Vec<E> = resp.json().unwrap();
+        *entity = entities.pop().unwrap();
         entity.set_session(self);
         Ok(resp)
     }
 
-    /// Start a new session. The root object is populated with a reference to the session.
-    pub fn connect<R>(&'a mut self, root: &mut R) -> Result<Response, BambouError>
-        where R: RestRootEntity<'a>
-    {
-        info!("Starting new session...");
-        let resp = try!(self.fetch_entity(root));
-        self.config.api_key = Some(root.get_api_key().unwrap().to_string());
-        root.set_session(self);
-        info!("New session started");
-        Ok(resp)
-    }
-
-    /// Fetch an entity and populate its attributes, but do not set the session on the entity.
-    fn fetch_entity<E>(&self, entity: &mut E) -> Result<Response, BambouError>
-        where E: RestEntity<'a>
-    {
-        let (resp, body) =
-            try!(self.http_get(&self.get_entity_path(entity), self.get_common_headers()));
-
-        // The api is weird: even when fetching a single object, we get a list
-        let mut entities: Vec<E> = try!(serde_json::from_str(&body));
-        *entity = try!(entities.pop()
-            .ok_or(BambouError::InvalidResponse("Failed to fetch entity: body is empty."
-                .to_string())));
-        Ok(resp)
-    }
-
-    /// Send a PUT request
-    fn http_put(&self,
-                path: &str,
-                body: &str,
-                headers: Headers)
-                -> Result<(Response, String), BambouError> {
-        let path = self.get_url(path);
-        info!("PUT >>> {} {}", path, body);
-        debug!("{}", &headers);
-
-        let mut resp = try!(self.client.put(&path).body(body).headers(headers).send());
-        let body = try!(Session::read_response(&mut resp));
-        info!("PUT <<< {} {}", &resp.status, &body);
-        debug!("{}", &resp.headers);
-
-        if resp.status != StatusCode::Ok {
-            return Err(BambouError::RequestFailed(Reason {
-                message: body,
-                status_code: resp.status,
-            }));
-        }
-        Ok((resp, body))
-    }
-
-    /// Send a GET request
-    fn http_get(&self, path: &str, headers: Headers) -> Result<(Response, String), BambouError> {
-        let path = self.get_url(path);
-        info!("GET >>> {}", path);
-        debug!("{}", &headers);
-
-        let mut resp = try!(self.client.get(&path).headers(headers).send());
-        let body = try!(Session::read_response(&mut resp));
-        info!("GET <<< {} {}", &resp.status, &body);
-        debug!("{}", &resp.headers);
-
-        if resp.status != StatusCode::Ok {
-            return Err(BambouError::RequestFailed(Reason {
-                message: body,
-                status_code: resp.status,
-            }));
-        }
-
-        Ok((resp, body))
-    }
-
-    /// Send a POST request
-    fn http_post(&self,
-                 path: &str,
-                 body: &str,
-                 headers: Headers)
-                 -> Result<(Response, String), BambouError> {
-        let path = self.get_url(path);
-        info!("POST >>> {} {}", path, body);
-        debug!("{}", &headers);
-
-        let mut resp = try!(self.client.post(&path).body(body).headers(headers).send());
-
-        let body = try!(Session::read_response(&mut resp));
-        info!("POST <<< {} {}", &resp.status, &body);
-        debug!("{}", &resp.headers);
-
-        if resp.status != StatusCode::Created {
-            return Err(BambouError::RequestFailed(Reason {
-                message: body,
-                status_code: resp.status,
-            }));
-        }
-
-        Ok((resp, body))
-    }
-
-    /// Send a DELETE request
-    fn http_delete(&self, path: &str, headers: Headers) -> Result<(Response, String), BambouError> {
-        let path = self.get_url(path);
-        info!("DELETE >>> {}", path);
-        debug!("{}", &headers);
-
-        let mut resp = try!(self.client.delete(&path).headers(headers).send());
-
-        let body = try!(Session::read_response(&mut resp));
-        info!("DELETE <<< {} {}", &resp.status, &body);
-        debug!("{}", &resp.headers);
-
-        if resp.status != StatusCode::NoContent {
-            return Err(BambouError::RequestFailed(Reason {
-                message: body,
-                status_code: resp.status,
-            }));
-        }
-
-        Ok((resp, body))
-    }
-
-    /// Return the response body
-    fn read_response(resp: &mut Response) -> Result<String, BambouError> {
-        let mut body = String::new();
-        try!(resp.read_to_string(&mut body));
-        Ok(body)
-    }
-
-    fn get_common_headers(&self) -> Headers {
+    fn headers(&self) -> Headers {
         let mut headers = Headers::new();
 
         // X-Nuage-Organization: organization
-        headers.set(XNuageOrganization(self.config.organization.clone()));
+        headers.set(XNuageOrganization(self.organization.clone()));
 
         // content-type: application/json
-        headers.set(ContentType(Mime(TopLevel::Application,
-                                     SubLevel::Json,
-                                     vec![(Attr::Charset, Value::Utf8)])));
+        headers.set(ContentType(Mime(TopLevel::Application, SubLevel::Json, vec![(Attr::Charset, Value::Utf8)])));
 
         // Authorization: base64("login:password")
         // or if we have an API Key already:
         // Authorization: base64("login:api_key")
         headers.set(Authorization(Basic {
-            username: self.config.username.clone(),
-            password: self.config
-                .api_key
-                .as_ref()
-                .and_then(|api_key| Some(api_key.clone()))
-                .or_else(|| Some(self.config.password.clone())),
+            username: self.username.clone(),
+            password: self.api_key.clone().or_else(|| Some(self.password.clone())),
         }));
 
         headers
     }
 
-    fn get_url(&self, path: &str) -> String {
-        let mut url = self.config.url.clone();
-        url.push_str(&self.config.root);
-        url.push_str(path);
-        url
-    }
-
-    fn get_entity_path<E>(&self, entity: &E) -> String
+    fn entity_url<E>(&self, entity: &E) -> Result<Url, Error>
         where E: RestEntity<'a>
     {
-        let mut path = E::path().to_string();
-        if entity.is_root() {
-            return path;
-        }
-        path.push('/');
-        path.push_str(entity.id().unwrap_or(""));
-        path
+        Ok(self.url.join(E::path()).unwrap().join(entity.id().unwrap_or("")).unwrap())
     }
+
 }

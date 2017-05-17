@@ -10,15 +10,9 @@ readme = "README.md"
 keywords = ["rest"]
 license-file = "LICENSE"
 
-[features]
-yaml = []
-yaml_format = []
-
 [dependencies]
 hyper = "*"
-serde = "0.8"
-serde_json = "0.8"
-serde_derive = "0.8"
-clippy = "*"
-log = "*"
-env_logger = "*"
+serde = "*"
+serde_json = "*"
+serde_derive = "*"
+reqwest = "*"
