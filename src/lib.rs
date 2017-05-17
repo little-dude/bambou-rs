@@ -74,15 +74,16 @@ header! { (XNuageOrganization, "X-Nuage-Organization") => [String] }
 
 impl<'a> Session {
     /// Create a new session.
-    pub fn new(url: &str, login: &str, password: &str, organization: &str) -> Self {
-        Session {
-            client: Client::new().unwrap(),
-            url: Url::parse(url).unwrap(),
+    pub fn new(url: &str, login: &str, password: &str, organization: &str) -> Result<Self, Error> {
+        let session = Session {
+            client: Client::new()?,
+            url: Url::parse(url)?,
             username: login.to_owned(),
             password: password.to_owned(),
             organization: organization.to_owned(),
             api_key: None,
-        }
+        };
+        Ok(session)
     }
 
     /// Delete an entity. This consumes the entity.
@@ -112,9 +113,7 @@ impl<'a> Session {
             .send()?;
 
         let mut entities: Vec<E> = resp.json()?;
-        *entity = entities
-            .pop()
-            .unwrap();
+        *entity = entities.pop().ok_or(Error::NoEntity)?;
         entity.set_session(self);
         Ok(resp)
     }
@@ -125,9 +124,9 @@ impl<'a> Session {
               C: RestEntity<'a>
     {
         let url = if parent.is_root() {
-            self.url.join(C::group_path()).unwrap()
+            self.url.join(C::group_path())?
         } else {
-            self.entity_url(parent).unwrap().join(C::group_path()).unwrap()
+            self.entity_url(parent)?.join(C::group_path())?
         };
         let headers = self.headers();
 
@@ -138,7 +137,7 @@ impl<'a> Session {
             .send()?;
 
         let mut entities: Vec<C> = resp.json()?;
-        *child = entities.pop().unwrap();
+        *child = entities.pop().ok_or(Error::NoEntity)?;
         child.set_session(self);
         Ok(resp)
     }
@@ -150,9 +149,9 @@ impl<'a> Session {
               C: RestEntity<'a>
     {
         let url = if parent.is_root() {
-            self.url.join(C::group_path()).unwrap()
+            self.url.join(C::group_path())?
         } else {
-            self.entity_url(parent).unwrap().join(C::group_path()).unwrap()
+            self.entity_url(parent)?.join(C::group_path())?
         };
         let headers = self.headers();
         let mut resp = self.client
@@ -174,16 +173,16 @@ impl<'a> Session {
     pub fn connect<R>(&'a mut self, root: &mut R) -> Result<Response, Error>
         where R: RestRootEntity<'a>
     {
-        let url = self.entity_url(root).unwrap();
+        let url = self.entity_url(root)?;
         let headers = self.headers();
         let client = self.client.clone();
         let mut resp = client
             .get(url)
             .headers(headers)
             .send()?;
-        let mut entities: Vec<R> = resp.json().unwrap();
-        *root = entities.pop().unwrap();
-        self.api_key = Some(root.get_api_key().unwrap().to_string());
+        let mut entities: Vec<R> = resp.json()?;
+        *root = entities.pop().ok_or(Error::NoEntity)?;
+        self.api_key = root.get_api_key().map(|s| s.to_string());
         root.set_session(self);
         Ok(resp)
     }
@@ -227,7 +226,10 @@ impl<'a> Session {
     fn entity_url<E>(&self, entity: &E) -> Result<Url, Error>
         where E: RestEntity<'a>
     {
-        Ok(self.url.join(E::path()).unwrap().join(entity.id().unwrap_or("")).unwrap())
+        let url = self.url
+            .join(E::path())?
+            .join(entity.id().ok_or(Error::MissingId)?)?;
+        Ok(url)
     }
 
 }
