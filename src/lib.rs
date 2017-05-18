@@ -60,7 +60,7 @@ pub trait RestRootEntity<'a>: RestEntity<'a> {
     fn get_api_key(&self) -> Option<&str>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Session {
     client: Client,
     pub url: Url,
