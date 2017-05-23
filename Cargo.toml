@@ -15,4 +15,4 @@ hyper = "*"
 serde = "*"
 serde_json = "*"
 serde_derive = "*"
-reqwest = "*"
+reqwest = { path = "/home/corentih/rust/reqwest" }

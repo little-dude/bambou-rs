@@ -6,12 +6,13 @@ extern crate reqwest;
 
 pub mod error;
 
-use reqwest::{Client, Response, Url};
+use reqwest::{Client, ClientBuilder, Response, Url};
 use reqwest::header::{Headers, Authorization, Basic, ContentType};
 use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
 use serde::Serialize;
 
 pub use error::{Error};
+pub use reqwest::Certificate;
 
 pub trait RestEntity<'a>: Serialize + for<'de> serde::Deserialize<'de> {
     /// Give a reference to an existing session to the entity. Without a session, an entity is
@@ -60,6 +61,58 @@ pub trait RestRootEntity<'a>: RestEntity<'a> {
     fn get_api_key(&self) -> Option<&str>;
 }
 
+pub struct SessionBuilder {
+    client_builder: ClientBuilder,
+    pub url: Url,
+    pub username: String,
+    pub password: String,
+    pub api_key: Option<String>,
+    pub organization: String,
+}
+
+impl SessionBuilder {
+    /// Create a new session builder
+    pub fn new(url: &str, login: &str, password: &str, organization: &str) -> Result<Self, Error> {
+        let session = SessionBuilder {
+            client_builder: ClientBuilder::new()?,
+            url: Url::parse(url)?,
+            username: login.to_owned(),
+            password: password.to_owned(),
+            organization: organization.to_owned(),
+            api_key: None,
+        };
+        Ok(session)
+    }
+
+    pub fn add_root_certificate(&mut self, cert: Certificate) -> Result<(), Error> {
+        self.client_builder.add_root_certificate(cert).unwrap();
+        Ok(())
+    }
+
+    /// Disable hostname verification
+    pub fn danger_disable_hostname_verification(&mut self) {
+        self.client_builder.danger_disable_hostname_verification();
+    }
+
+    /// Enable hostname verification
+    pub fn enable_hostname_verification(&mut self) {
+        self.client_builder.enable_hostname_verification();
+    }
+
+    pub fn build(self) -> Result<Session, Error> {
+        Ok(Session {
+            client: self.client_builder.build()?,
+            url: self.url,
+            username: self.username,
+            password: self.password,
+            api_key: self.api_key,
+            organization: self.organization,
+        })
+    }
+}
+
+header! { (XNuageOrganization, "X-Nuage-Organization") => [String] }
+
 #[derive(Clone, Debug)]
 pub struct Session {
     client: Client,
@@ -70,21 +123,7 @@ pub struct Session {
     pub organization: String,
 }
 
-header! { (XNuageOrganization, "X-Nuage-Organization") => [String] }
-
 impl<'a> Session {
-    /// Create a new session.
-    pub fn new(url: &str, login: &str, password: &str, organization: &str) -> Result<Self, Error> {
-        let session = Session {
-            client: Client::new()?,
-            url: Url::parse(url)?,
-            username: login.to_owned(),
-            password: password.to_owned(),
-            organization: organization.to_owned(),
-            api_key: None,
-        };
-        Ok(session)
-    }
 
     /// Delete an entity. This consumes the entity.
     pub fn delete<E>(&self, entity: E) -> Result<Response, Error>
