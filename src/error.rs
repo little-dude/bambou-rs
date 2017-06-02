@@ -18,7 +18,9 @@ impl fmt::Display for Error {
             Error::Reqwest(ref e) => fmt::Display::fmt(e, f),
             Error::MissingId => f.write_str("The entity does not have an ID"),
             Error::NoEntity => f.write_str("No entity in response body"),
-            Error::NoSession => f.write_str("Entities must hold a reference to a session to perform ReST requests"),
+            Error::NoSession => {
+                f.write_str("Entities must hold a reference to a session to perform ReST requests")
+            }
         }
     }
 }

@@ -11,7 +11,7 @@ use reqwest::header::{Headers, Authorization, Basic, ContentType};
 use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
 use serde::Serialize;
 
-pub use error::{Error};
+pub use error::Error;
 pub use reqwest::Certificate;
 
 pub trait RestEntity<'a>: Serialize + for<'de> serde::Deserialize<'de> {
@@ -51,8 +51,7 @@ pub trait RestEntity<'a>: Serialize + for<'de> serde::Deserialize<'de> {
         where C: RestEntity<'a>;
 
     /// Create a child entity.
-    fn create_child<C>(&self, child: &mut C) -> Result<Response, Error>
-        where C: RestEntity<'a>;
+    fn create_child<C>(&self, child: &mut C) -> Result<Response, Error> where C: RestEntity<'a>;
 }
 pub trait RestRootEntity<'a>: RestEntity<'a> {
     /// Return the API key for the current session. After the first password authentication, the
@@ -91,7 +90,8 @@ impl SessionBuilder {
 
     /// Disable hostname verification
     pub fn danger_disable_hostname_verification(&mut self) {
-        self.client_builder.danger_disable_hostname_verification();
+        self.client_builder
+            .danger_disable_hostname_verification();
     }
 
     /// Enable hostname verification
@@ -101,13 +101,13 @@ impl SessionBuilder {
 
     pub fn build(mut self) -> Result<Session, Error> {
         Ok(Session {
-            client: self.client_builder.build()?,
-            url: self.url,
-            username: self.username,
-            password: self.password,
-            api_key: self.api_key,
-            organization: self.organization,
-        })
+               client: self.client_builder.build()?,
+               url: self.url,
+               username: self.username,
+               password: self.password,
+               api_key: self.api_key,
+               organization: self.organization,
+           })
     }
 }
 
@@ -124,17 +124,13 @@ pub struct Session {
 }
 
 impl<'a> Session {
-
     /// Delete an entity. This consumes the entity.
     pub fn delete<E>(&self, entity: E) -> Result<Response, Error>
         where E: RestEntity<'a>
     {
         let url = self.entity_url(&entity)?;
         let headers = self.headers();
-        let resp = self.client
-            .delete(url)?
-            .headers(headers)
-            .send()?;
+        let resp = self.client.delete(url)?.headers(headers).send()?;
         Ok(resp)
     }
 
@@ -183,7 +179,10 @@ impl<'a> Session {
 
     /// Fetch the children of a parent entity, and give the children a reference to the current
     /// session.
-    pub fn fetch_children<P, C>(&'a self, parent: &P, children: &mut Vec<C>) -> Result<Response, Error>
+    pub fn fetch_children<P, C>(&'a self,
+                                parent: &P,
+                                children: &mut Vec<C>)
+                                -> Result<Response, Error>
         where P: RestEntity<'a>,
               C: RestEntity<'a>
     {
@@ -193,10 +192,7 @@ impl<'a> Session {
             self.entity_url(parent)?.join(C::group_path())?
         };
         let headers = self.headers();
-        let mut resp = self.client
-            .get(url)?
-            .headers(headers)
-            .send()?;
+        let mut resp = self.client.get(url)?.headers(headers).send()?;
 
         // XXX: No idea why I can't just write `children = resp.json()?;`
         let children_: Vec<C> = resp.json()?;
@@ -215,10 +211,7 @@ impl<'a> Session {
         let url = self.entity_url(root)?;
         let headers = self.headers();
         let client = self.client.clone();
-        let mut resp = client
-            .get(url)?
-            .headers(headers)
-            .send()?;
+        let mut resp = client.get(url)?.headers(headers).send()?;
         let mut entities: Vec<R> = resp.json()?;
         *root = entities.pop().ok_or(Error::NoEntity)?;
         self.api_key = root.get_api_key().map(|s| s.to_string());
@@ -232,10 +225,7 @@ impl<'a> Session {
     {
         let url = self.entity_url(entity)?;
         let headers = self.headers();
-        let mut resp = self.client
-            .get(url)?
-            .headers(headers)
-            .send()?;
+        let mut resp = self.client.get(url)?.headers(headers).send()?;
         let mut entities: Vec<E> = resp.json()?;
         *entity = entities.pop().unwrap();
         entity.set_session(self);
@@ -249,15 +239,19 @@ impl<'a> Session {
         headers.set(XNuageOrganization(self.organization.clone()));
 
         // content-type: application/json
-        headers.set(ContentType(Mime(TopLevel::Application, SubLevel::Json, vec![(Attr::Charset, Value::Utf8)])));
+        headers.set(ContentType(Mime(TopLevel::Application,
+                                     SubLevel::Json,
+                                     vec![(Attr::Charset, Value::Utf8)])));
 
         // Authorization: base64("login:password")
         // or if we have an API Key already:
         // Authorization: base64("login:api_key")
         headers.set(Authorization(Basic {
-            username: self.username.clone(),
-            password: self.api_key.clone().or_else(|| Some(self.password.clone())),
-        }));
+                                      username: self.username.clone(),
+                                      password: self.api_key
+                                          .clone()
+                                          .or_else(|| Some(self.password.clone())),
+                                  }));
 
         headers
     }
@@ -270,5 +264,4 @@ impl<'a> Session {
             .join(entity.id().ok_or(Error::MissingId)?)?;
         Ok(url)
     }
-
 }
